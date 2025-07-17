@@ -27,10 +27,10 @@ const connection = mysql.createConnection({
 
 connection.connect((err) => {
     if (err) {
-        console.error('Error connecting to MySQL:', err);
+        console.error('Error connecting to MySQL1:', err);
         return;
     }
-    console.log('Connected to MySQL database');
+    console.log('Connected to MySQL database1');
 });
 
 // Set up view engine

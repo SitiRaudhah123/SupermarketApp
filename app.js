@@ -1,4 +1,4 @@
-// SOME PART ASK AI FOR HELP SINCE THERE PART I STRUGGLE TO FIND MY ERROR/FIX IT!
+// SOME PART ASK AI FOR HELP SINCE THERE PART I STRUGGLE TO SOLVE MY ERROR/FIX IT!
 const express = require('express');
 const mysql = require('mysql2/promise'); 
 const session = require('express-session');

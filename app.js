@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql2');
+const mysql = require('mysql2/promise'); // <--- CHANGE 1: Import mysql2's promise-based API
 const session = require('express-session');
 const flash = require('connect-flash');
 const multer = require('multer');
@@ -11,44 +11,50 @@ const storage = multer.diskStorage({
         cb(null, 'public/images'); // Directory to save uploaded files
     },
     filename: (req, file, cb) => {
-        cb(null, file.originalname); 
+        cb(null, file.originalname);
     }
 });
 
 const upload = multer({ storage: storage });
 
-const connection = mysql.createConnection({
+// <--- CHANGE 2: Use mysql.createPool instead of mysql.createConnection
+const pool = mysql.createPool({ // Renamed 'connection' to 'pool' for clarity
     host: 'o453e1.h.filess.io',
     user: 'c237supermarketdb_solvenoise',
-    password: 'Group5@123?',
-    database: '6105c8b786e81037ce9c11007746e578f1c79cae',
-    port: 3307
-  });
-
-connection.connect((err) => {
-    if (err) {
-        console.error('Error connecting to MySQL:', err);
-        return;
-    }
-    console.log('Connected to MySQL database');
+    password: '6105c8b786e81037ce9c11007746e578f1c79cae', // <--- Ensure this is the EXACT password from Filess.io
+    database: 'c237supermarketdb_solvenoise', // <--- Ensure this is the EXACT database ID from Filess.io
+    port: 3307,
+    connectionLimit: 2 // <--- CHANGE 3: VERY IMPORTANT for Filess.io Free Tier. Keep this low (e.g., 1 or 2).
 });
+
+// <--- CHANGE 4: Test pool connection instead of direct connection
+pool.getConnection()
+    .then(conn => {
+        console.log('Connected to MySQL database pool');
+        conn.release(); // Release the connection immediately after testing
+    })
+    .catch(err => {
+        console.error('Error connecting to MySQL pool:', err);
+        // It's good practice to exit the app if the database connection fails on startup
+        process.exit(1);
+    });
 
 // Set up view engine
 app.set('view engine', 'ejs');
-//  enable static files
+//  enable static files
 app.use(express.static('public'));
 // enable form processing
 app.use(express.urlencoded({
     extended: false
 }));
 
-//TO DO: Insert code for Session Middleware below 
+//TO DO: Insert code for Session Middleware below
 app.use(session({
     secret: 'secret',
     resave: false,
     saveUninitialized: true,
     // Session expires after 1 week of inactivity
-    cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 } 
+    cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
 
 app.use(flash());
@@ -80,7 +86,7 @@ const validateRegistration = (req, res, next) => {
     if (!username || !email || !password || !address || !contact || !role) {
         return res.status(400).send('All fields are required.');
     }
-    
+
     if (password.length < 6) {
         req.flash('error', 'Password should be at least 6 or more characters long');
         req.flash('formData', req.body);
@@ -90,42 +96,49 @@ const validateRegistration = (req, res, next) => {
 };
 
 // Define routes
-app.get('/',  (req, res) => {
-    res.render('index', {user: req.session.user} );
+app.get('/', (req, res) => {
+    res.render('index', { user: req.session.user });
 });
 
-app.get('/inventory', checkAuthenticated, checkAdmin, (req, res) => {
-    // Fetch data from MySQL
-    connection.query('SELECT * FROM products', (error, results) => {
-      if (error) throw error;
-      res.render('inventory', { products: results, user: req.session.user });
-    });
+// <--- CHANGE 5: Use pool.query (with async/await) for all database operations
+app.get('/inventory', checkAuthenticated, checkAdmin, async (req, res) => {
+    try {
+        const [results] = await pool.query('SELECT * FROM products'); // Note: mysql2/promise returns [rows, fields]
+        res.render('inventory', { products: results, user: req.session.user });
+    } catch (error) {
+        console.error('Error fetching inventory:', error);
+        res.status(500).send('Error fetching inventory data.');
+    }
 });
 
 app.get('/register', (req, res) => {
     res.render('register', { messages: req.flash('error'), formData: req.flash('formData')[0] });
 });
 
-app.post('/register', validateRegistration, (req, res) => {
-
+app.post('/register', validateRegistration, async (req, res) => { // Added async
     const { username, email, password, address, contact, role } = req.body;
-
     const sql = 'INSERT INTO users (username, email, password, address, contact, role) VALUES (?, ?, SHA1(?), ?, ?, ?)';
-    connection.query(sql, [username, email, password, address, contact, role], (err, result) => {
-        if (err) {
-            throw err;
-        }
+    try {
+        const [result] = await pool.query(sql, [username, email, password, address, contact, role]); // Used pool.query
         console.log(result);
         req.flash('success', 'Registration successful! Please log in.');
         res.redirect('/login');
-    });
+    } catch (err) {
+        console.error('Error registering user:', err); // Better error logging
+        if (err.code === 'ER_DUP_ENTRY') { // Example: handle duplicate email
+            req.flash('error', 'Email already registered. Please use a different one.');
+            req.flash('formData', req.body);
+            return res.redirect('/register');
+        }
+        res.status(500).send('Error during registration.'); // Generic error for client
+    }
 });
 
 app.get('/login', (req, res) => {
     res.render('login', { messages: req.flash('success'), errors: req.flash('error') });
 });
 
-app.post('/login', (req, res) => {
+app.post('/login', async (req, res) => { // Added async
     const { email, password } = req.body;
 
     // Validate email and password
@@ -135,16 +148,14 @@ app.post('/login', (req, res) => {
     }
 
     const sql = 'SELECT * FROM users WHERE email = ? AND password = SHA1(?)';
-    connection.query(sql, [email, password], (err, results) => {
-        if (err) {
-            throw err;
-        }
+    try {
+        const [results] = await pool.query(sql, [email, password]); // Used pool.query
 
         if (results.length > 0) {
             // Successful login
-            req.session.user = results[0]; 
+            req.session.user = results[0];
             req.flash('success', 'Login successful!');
-            if(req.session.user.role == 'user')
+            if (req.session.user.role == 'user')
                 res.redirect('/shopping');
             else
                 res.redirect('/inventory');
@@ -153,23 +164,28 @@ app.post('/login', (req, res) => {
             req.flash('error', 'Invalid email or password.');
             res.redirect('/login');
         }
-    });
+    } catch (err) {
+        console.error('Error during login:', err); // Better error logging
+        res.status(500).send('Error during login process.');
+    }
 });
 
-app.get('/shopping', checkAuthenticated, (req, res) => {
-    // Fetch data from MySQL
-    connection.query('SELECT * FROM products', (error, results) => {
-        if (error) throw error;
+app.get('/shopping', checkAuthenticated, async (req, res) => { // Added async
+    try {
+        const [results] = await pool.query('SELECT * FROM products'); // Used pool.query
         res.render('shopping', { user: req.session.user, products: results });
-      });
+    } catch (error) {
+        console.error('Error fetching shopping products:', error);
+        res.status(500).send('Error fetching products for shopping.');
+    }
 });
 
-app.post('/add-to-cart/:id', checkAuthenticated, (req, res) => {
+app.post('/add-to-cart/:id', checkAuthenticated, async (req, res) => { // Added async
     const productId = parseInt(req.params.id);
     const quantity = parseInt(req.body.quantity) || 1;
 
-    connection.query('SELECT * FROM products WHERE productId = ?', [productId], (error, results) => {
-        if (error) throw error;
+    try {
+        const [results] = await pool.query('SELECT * FROM products WHERE productId = ?', [productId]); // Used pool.query
 
         if (results.length > 0) {
             const product = results[0];
@@ -192,12 +208,14 @@ app.post('/add-to-cart/:id', checkAuthenticated, (req, res) => {
                     image: product.image
                 });
             }
-
             res.redirect('/cart');
         } else {
             res.status(404).send("Product not found");
         }
-    });
+    } catch (error) {
+        console.error('Error adding to cart:', error);
+        res.status(500).send('Error adding product to cart.');
+    }
 });
 
 app.get('/cart', checkAuthenticated, (req, res) => {
@@ -210,108 +228,92 @@ app.get('/logout', (req, res) => {
     res.redirect('/');
 });
 
-app.get('/product/:id', checkAuthenticated, (req, res) => {
-  // Extract the product ID from the request parameters
-  const productId = req.params.id;
+app.get('/product/:id', checkAuthenticated, async (req, res) => { // Added async
+    const productId = req.params.id;
 
-  // Fetch data from MySQL based on the product ID
-  connection.query('SELECT * FROM products WHERE productId = ?', [productId], (error, results) => {
-      if (error) throw error;
+    try {
+        const [results] = await pool.query('SELECT * FROM products WHERE productId = ?', [productId]); // Used pool.query
 
-      // Check if any product with the given ID was found
-      if (results.length > 0) {
-          // Render HTML page with the product data
-          res.render('product', { product: results[0], user: req.session.user  });
-      } else {
-          // If no product with the given ID was found, render a 404 page or handle it accordingly
-          res.status(404).send('Product not found');
-      }
-  });
+        if (results.length > 0) {
+            res.render('product', { product: results[0], user: req.session.user });
+        } else {
+            res.status(404).send('Product not found');
+        }
+    } catch (error) {
+        console.error('Error fetching product details:', error);
+        res.status(500).send('Error fetching product details.');
+    }
 });
 
 app.get('/addProduct', checkAuthenticated, checkAdmin, (req, res) => {
-    res.render('addProduct', {user: req.session.user } ); 
+    res.render('addProduct', { user: req.session.user });
 });
 
-app.post('/addProduct', upload.single('image'),  (req, res) => {
-    // Extract product data from the request body
-    const { name, quantity, price} = req.body;
+app.post('/addProduct', upload.single('image'), async (req, res) => { // Added async
+    const { name, quantity, price } = req.body;
     let image;
     if (req.file) {
-        image = req.file.filename; // Save only the filename
+        image = req.file.filename;
     } else {
         image = null;
     }
 
     const sql = 'INSERT INTO products (productName, quantity, price, image) VALUES (?, ?, ?, ?)';
-    // Insert the new product into the database
-    connection.query(sql , [name, quantity, price, image], (error, results) => {
-        if (error) {
-            // Handle any error that occurs during the database operation
-            console.error("Error adding product:", error);
-            res.status(500).send('Error adding product');
-        } else {
-            // Send a success response
-            res.redirect('/inventory');
-        }
-    });
+    try {
+        const [results] = await pool.query(sql, [name, quantity, price, image]); // Used pool.query
+        res.redirect('/inventory');
+    } catch (error) {
+        console.error("Error adding product:", error);
+        res.status(500).send('Error adding product');
+    }
 });
 
-app.get('/updateProduct/:id',checkAuthenticated, checkAdmin, (req,res) => {
+app.get('/updateProduct/:id', checkAuthenticated, checkAdmin, async (req, res) => { // Added async
     const productId = req.params.id;
     const sql = 'SELECT * FROM products WHERE productId = ?';
 
-    // Fetch data from MySQL based on the product ID
-    connection.query(sql , [productId], (error, results) => {
-        if (error) throw error;
+    try {
+        const [results] = await pool.query(sql, [productId]); // Used pool.query
 
-        // Check if any product with the given ID was found
         if (results.length > 0) {
-            // Render HTML page with the product data
             res.render('updateProduct', { product: results[0] });
         } else {
-            // If no product with the given ID was found, render a 404 page or handle it accordingly
             res.status(404).send('Product not found');
         }
-    });
+    } catch (error) {
+        console.error("Error retrieving product for update:", error);
+        res.status(500).send('Error retrieving product for update.');
+    }
 });
 
-app.post('/updateProduct/:id', upload.single('image'), (req, res) => {
+app.post('/updateProduct/:id', upload.single('image'), async (req, res) => { // Added async
     const productId = req.params.id;
-    // Extract product data from the request body
     const { name, quantity, price } = req.body;
-    let image  = req.body.currentImage; //retrieve current image filename
-    if (req.file) { //if new image is uploaded
-        image = req.file.filename; // set image to be new image filename
-    } 
+    let image = req.body.currentImage;
+    if (req.file) {
+        image = req.file.filename;
+    }
 
     const sql = 'UPDATE products SET productName = ? , quantity = ?, price = ?, image =? WHERE productId = ?';
-    // Insert the new product into the database
-    connection.query(sql, [name, quantity, price, image, productId], (error, results) => {
-        if (error) {
-            // Handle any error that occurs during the database operation
-            console.error("Error updating product:", error);
-            res.status(500).send('Error updating product');
-        } else {
-            // Send a success response
-            res.redirect('/inventory');
-        }
-    });
+    try {
+        const [results] = await pool.query(sql, [name, quantity, price, image, productId]); // Used pool.query
+        res.redirect('/inventory');
+    } catch (error) {
+        console.error("Error updating product:", error);
+        res.status(500).send('Error updating product');
+    }
 });
 
-app.get('/deleteProduct/:id', (req, res) => {
+app.get('/deleteProduct/:id', async (req, res) => { // Added async
     const productId = req.params.id;
 
-    connection.query('DELETE FROM products WHERE productId = ?', [productId], (error, results) => {
-        if (error) {
-            // Handle any error that occurs during the database operation
-            console.error("Error deleting product:", error);
-            res.status(500).send('Error deleting product');
-        } else {
-            // Send a success response
-            res.redirect('/inventory');
-        }
-    });
+    try {
+        const [results] = await pool.query('DELETE FROM products WHERE productId = ?', [productId]); // Used pool.query
+        res.redirect('/inventory');
+    } catch (error) {
+        console.error("Error deleting product:", error);
+        res.status(500).send('Error deleting product');
+    }
 });
 
 const PORT = process.env.PORT || 3000;
